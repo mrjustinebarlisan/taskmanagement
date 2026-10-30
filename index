@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taskboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <h1>Taskboard</h1>
+  <form id="member-form" class="inline" aria-label="Add team member">
+    <input id="member-name" placeholder="Add teammate" required>
+    <button>Add</button>
+  </form>
+</header>
+
+<form id="task-form" class="composer" aria-label="New task">
+  <input id="title" placeholder="What needs doing?" required>
+  <select id="assignee" aria-label="Assignee"></select>
+  <input id="due" type="date" aria-label="Due date">
+  <input id="slack" type="url" placeholder="Slack thread link (optional)" aria-label="Slack thread link">
+  <button>Add task</button>
+</form>
+
+<main id="board" class="board"></main>
+<script src="app.js"></script>
+</body>
+</html>
+
+:root{--bg:#f3f4f1;--ink:#1d2327;--muted:#66707a;--line:#d9ddd6;--card:#fff;--accent:#1f5eff;--late:#c4321c;--soon:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#15191c;--ink:#e8ebe6;--muted:#97a1a9;--line:#2b3238;--card:#1d2328;--accent:#6c97ff;--late:#ff7b66;--soon:#e3b341}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:1.25rem;max-width:1100px;margin-inline:auto}
+h1{font-size:1.5rem;margin:0;letter-spacing:-.02em}
+.top{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1rem}
+.inline{display:flex;gap:.5rem}
+input,select,button{font:inherit;color:inherit;padding:.5rem .65rem;border:1px solid var(--line);border-radius:6px;background:var(--card)}
+button{background:var(--accent);color:#fff;border-color:transparent;cursor:pointer;font-weight:600}
+button.ghost{background:none;color:var(--muted);border-color:var(--line);font-weight:400;padding:.25rem .5rem;font-size:.85rem}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.composer{display:grid;grid-template-columns:2fr 1fr 1fr 2fr auto;gap:.5rem;margin-bottom:1.5rem}
+.board{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;align-items:start}
+.col{border-top:3px solid var(--line);padding-top:.5rem}
+.col h2{font-size:1rem;margin:0 0 .75rem;display:flex;justify-content:space-between}
+.col h2 span{color:var(--muted);font-weight:400}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.75rem;margin-bottom:.6rem}
+.card.late{border-left:4px solid var(--late)}
+.card.soon{border-left:4px solid var(--soon)}
+.card p{margin:0 0 .4rem;font-weight:600}
+.meta{display:flex;flex-wrap:wrap;gap:.35rem .75rem;font-size:.85rem;color:var(--muted);margin-bottom:.5rem}
+.meta .late{color:var(--late);font-weight:600}
+.meta a{color:var(--accent)}
+.actions{display:flex;gap:.4rem}
+.empty{color:var(--muted);font-size:.9rem}
+@media (max-width:800px){.composer{grid-template-columns:1fr 1fr}.composer input:first-child,.composer input[type=url]{grid-column:1/-1}.board{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+// ---- Storage layer: swap this object for Supabase later; the UI only calls these methods.
+const store = {
+  load() {
+    try { return JSON.parse(localStorage.getItem('taskboard')) || { members: ['Me'], tasks: [] }; }
+    catch { return { members: ['Me'], tasks: [] }; }
+  },
+  save(state) { localStorage.setItem('taskboard', JSON.stringify(state)); }
+};
+
+// ---- Slack hook: needs a server-side function (webhook URLs are secrets). Leave empty for now.
+const SLACK_FUNCTION_URL = '';
+async function notifySlack(task) {
+  if (!SLACK_FUNCTION_URL) return;
+  try {
+    await fetch(SLACK_FUNCTION_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: task.title, assignee: task.assignee, due: task.due })
+    });
+  } catch (e) { console.warn('Slack notify failed', e); }
+}
+
+const STATUSES = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done']];
+const state = store.load();
+const $ = (id) => document.getElementById(id);
+
+function dueInfo(task) {
+  if (!task.due || task.status === 'done') return { label: task.due ? fmt(task.due) : 'No due date', cls: '' };
+  const days = Math.round((new Date(task.due + 'T00:00') - new Date().setHours(0, 0, 0, 0)) / 864e5);
+  if (days < 0) return { label: `Overdue by ${-days}d`, cls: 'late' };
+  if (days <= 2) return { label: days === 0 ? 'Due today' : `Due in ${days}d`, cls: 'soon' };
+  return { label: fmt(task.due), cls: '' };
+}
+const fmt = (d) => new Date(d + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+function el(tag, props = {}, ...kids) {
+  const n = Object.assign(document.createElement(tag), props);
+  kids.forEach((k) => n.append(k));
+  return n;
+}
+
+function render() {
+  store.save(state);
+  $('assignee').replaceChildren(...state.members.map((m) => el('option', { value: m, textContent: m })));
+  const board = $('board');
+  board.replaceChildren(...STATUSES.map(([key, label]) => {
+    const tasks = state.tasks.filter((t) => t.status === key);
+    const col = el('section', { className: 'col' }, el('h2', {}, label, el('span', { textContent: tasks.length })));
+    if (!tasks.length) col.append(el('p', { className: 'empty', textContent: 'Nothing here yet.' }));
+    tasks.forEach((t) => col.append(card(t)));
+    return col;
+  }));
+}
+
+function card(t) {
+  const due = dueInfo(t);
+  const meta = el('div', { className: 'meta' },
+    el('span', { textContent: t.assignee || 'Unassigned' }),
+    el('span', { className: due.cls, textContent: due.label }));
+  if (t.slack) meta.append(el('a', { href: t.slack, target: '_blank', rel: 'noopener', textContent: 'Slack thread' }));
+
+  const move = el('select', { ariaLabel: 'Move task' }, ...STATUSES.map(([k, l]) => el('option', { value: k, textContent: l, selected: k === t.status })));
+  move.onchange = () => { t.status = move.value; render(); };
+  const del = el('button', { className: 'ghost', textContent: 'Delete' });
+  del.onclick = () => { state.tasks = state.tasks.filter((x) => x.id !== t.id); render(); };
+
+  return el('article', { className: 'card ' + due.cls }, el('p', { textContent: t.title }), meta, el('div', { className: 'actions' }, move, del));
+}
+
+$('task-form').onsubmit = (e) => {
+  e.preventDefault();
+  const task = { id: crypto.randomUUID(), title: $('title').value.trim(), assignee: $('assignee').value, due: $('due').value, slack: $('slack').value.trim(), status: 'todo' };
+  state.tasks.unshift(task);
+  e.target.reset();
+  render();
+  notifySlack(task);
+};
+
+$('member-form').onsubmit = (e) => {
+  e.preventDefault();
+  const name = $('member-name').value.trim();
+  if (name && !state.members.includes(name)) state.members.push(name);
+  e.target.reset();
+  render();
+};
+
+render();
+
+# Taskboard
+
+A small task manager: assign tasks, set due dates, attach a Slack thread link. Unaffiliated practice project.
+
+## Run locally
+Open `index.html`, or `npx serve .`
+
+## Deploy
+Push to GitHub → Settings → Pages → deploy from the `main` branch root.
+
+## Roadmap
+- [ ] Supabase for shared data + login (replace the `store` object in `app.js`)
+- [ ] Slack webhook behind a serverless function (set `SLACK_FUNCTION_URL`)
+- [ ] Scheduled due-date reminders (GitHub Action or Supabase cron)
